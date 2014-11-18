@@ -72,6 +72,7 @@ static unsigned int wipower_flag = 0;
 static unsigned int wipower_handoff_ready = 0;
 char *rampatch_file_path;
 char *nvm_file_path;
+char *fw_su_info = NULL;
 extern char enable_extldo;
 
 /******************************************************************************
@@ -218,7 +219,13 @@ int get_vs_hci_event(unsigned char *rsp)
                ALOGE("%s: WiPower Charging hand off not ready!!!", __FUNCTION__);
             }
             break;
-
+        case HCI_VS_GET_ADDON_FEATURES_EVENT:
+            if ((rsp[4] & ADDON_FEATURES_EVT_WIPOWER_MASK))
+            {
+               ALOGD("%s: WiPower feature supported!!", __FUNCTION__);
+               property_set("persist.bluetooth.a4wp", "true");
+            }
+            break;
         default:
             ALOGE("%s: Not a valid status!!!", __FUNCTION__);
             err = -1;
@@ -790,6 +797,18 @@ int rome_get_tlv_file(char *file_path)
         ALOGI("Product ID\t\t\t : 0x%04x\n", ptlv_header->tlv.patch.prod_id);
         ALOGI("Rom Build Version\t\t : 0x%04x\n", ptlv_header->tlv.patch.build_ver);
         ALOGI("Patch Version\t\t : 0x%04x\n", ptlv_header->tlv.patch.patch_ver);
+        if (fw_su_info ) {
+            FILE *btversionfile = 0;
+            if (NULL != (btversionfile = fopen(BT_VERSION_FILEPATH, "a+b"))) {
+                fprintf(btversionfile, "Bluetooth Controller FW SU Version : 0x%04x (%s-%05d)\n",
+                    ptlv_header->tlv.patch.patch_ver,
+                    fw_su_info,
+                    (ptlv_header->tlv.patch.patch_ver - 0x0111 -1 )
+                    );
+                fclose(btversionfile);
+            }
+        }
+
         ALOGI("Reserved\t\t\t : 0x%x\n", ptlv_header->tlv.patch.reserved2);
         ALOGI("Patch Entry Address\t\t : 0x%x\n", (ptlv_header->tlv.patch.patch_entry_addr));
         ALOGI("====================================================");
@@ -1454,6 +1473,42 @@ error:
     return err;
 }
 
+int addon_feature_req(int fd)
+{
+    int size, err = 0;
+    unsigned char cmd[HCI_MAX_CMD_SIZE];
+    unsigned char rsp[HCI_MAX_EVENT_SIZE];
+    hci_command_hdr *cmd_hdr;
+    int flags;
+
+    memset(cmd, 0x0, HCI_MAX_CMD_SIZE);
+
+    cmd_hdr = (void *) (cmd + 1);
+    cmd[0]  = HCI_COMMAND_PKT;
+    cmd_hdr->opcode = cmd_opcode_pack(HCI_VENDOR_CMD_OGF, HCI_VS_GET_ADDON_FEATURES_SUPPORT);
+    cmd_hdr->plen     = 0x00;
+
+    /* Total length of the packet to be sent to the Controller */
+    size = (HCI_CMD_IND + HCI_COMMAND_HDR_SIZE + EDL_WIP_QUERY_CHARGING_STATUS_LEN);
+
+    ALOGD("%s: Sending HCI_VS_GET_ADDON_FEATURES_SUPPORT", __FUNCTION__);
+    ALOGD("HCI-CMD: \t0x%x \t0x%x \t0x%x \t0x%x \t0x%x", cmd[0], cmd[1], cmd[2], cmd[3], cmd[4]);
+    err = hci_send_vs_cmd(fd, (unsigned char *)cmd, rsp, size);
+    if ( err != size) {
+        ALOGE("Failed to send HCI_VS_GET_ADDON_FEATURES_SUPPORT command!");
+        goto error;
+    }
+
+    err = read_hci_event(fd, rsp, HCI_MAX_EVENT_SIZE);
+    if (err < 0) {
+        ALOGE("%s: Failed to get feature request", __FUNCTION__);
+        goto error;
+    }
+error:
+    return err;
+}
+
+
 int check_embedded_mode(int fd) {
     int err = 0;
 
@@ -1468,6 +1523,17 @@ int check_embedded_mode(int fd) {
     ALOGE("%s: wipower_flag: %d", __FUNCTION__, wipower_flag);
 
     return wipower_flag;
+}
+
+int rome_get_addon_feature_list(fd) {
+    int err = 0;
+
+    /* Get addon features that are supported by FW */
+    if ((err = addon_feature_req(fd)) < 0)
+    {
+        ALOGE("%s: failed (0x%x)", __FUNCTION__, err);
+    }
+    return err;
 }
 
 int rome_wipower_forward_handoff_req(int fd)
@@ -1640,10 +1706,12 @@ int rome_soc_init(int fd, char *bdaddr)
         case ROME_VER_3_0:
             rampatch_file_path = ROME_RAMPATCH_TLV_3_0_0_PATH;
             nvm_file_path = ROME_NVM_TLV_3_0_0_PATH;
+            fw_su_info = ROME_3_1_FW_SU;
             goto download;
         case ROME_VER_3_2:
             rampatch_file_path = ROME_RAMPATCH_TLV_3_0_2_PATH;
             nvm_file_path = ROME_NVM_TLV_3_0_2_PATH;
+            fw_su_info = ROME_3_2_FW_SU;
 
 download:
             /* Change baud rate 115.2 kbps to 3Mbps*/
